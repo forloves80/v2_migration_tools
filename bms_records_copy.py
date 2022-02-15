@@ -3,7 +3,7 @@ from collections import deque
 from bw_utils import *
 from datetime import datetime
 from loguru import logger
-import json, setproctitle, logging, os, multiprocessing
+import json, setproctitle, logging, os, multiprocessing, sys
 
 
 __APP_NAME__ = 'bw_rec_copy'
@@ -64,16 +64,36 @@ class ClientDBSaver(multiprocessing.Process):
         try:
             cluster = Cluster(__TARGET_HOST__)
             self.session = cluster.connect(__KEYSPACE__)
+            saved = self.session.execute(f"SELECT * FROM bms_records WHERE clientid='{self.clientid}' ORDER BY timestamp ASC limit 1")
+            datekey = None
+            timekey = None
+            if saved and len(saved.current_rows) > 0:
+                saved_data = saved.one()
+                datekey = saved_data.datekey
+                timekey = saved_data.timekey
 
-            try:
-                while True:
-                    data = self.dataque.popleft()
-                    self._addStation(data)
+            if datekey is None or datekey >= self.datekey:
+                try:
+                    if datekey is not None and datekey == self.datekey:
+                        data = self.dataque.popleft()
 
-            except IndexError:
-                pass
+                        while data.timekey >= timekey:
+                            data = self.dataque.popleft()
 
-            self._saveToDB()
+                        self.dataque.appendleft(data)
+                        log_d(f'[{self.name}] some datas skipped because already data is saved')
+
+                    while True:
+                        data = self.dataque.popleft()
+                        self._addStation(data)
+
+                except IndexError:
+                    pass
+
+                self._saveToDB()
+
+            else:
+                log_d(f'[{self.name}] skipped because already data is saved')
 
             cluster.shutdown()
         except KeyboardInterrupt:
@@ -92,7 +112,6 @@ class ClientDBSaver(multiprocessing.Process):
     def _saveToDB(self):
         r_cnt = len(self.data_station)
         if r_cnt <= 0:
-            log_e(f'[{self.clientid}:{self.datekey}] no data to save')
             return
 
         self.data_station.sort(key=cmp_to_key(f_cmp_index))
@@ -123,7 +142,6 @@ def manage_process(proc_list):
     log_d(f'[MAIN] process info alive: {alive_cnt}, total: {proc_cnt}')
 
 def main():
-
     proc_list = []
     cur_proc = None
 
